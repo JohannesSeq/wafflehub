@@ -15,9 +15,21 @@ Open **http://localhost:5174**. The API runs on **127.0.0.1:3002**. These ports 
 
 The first run opens Sakura’s room in **demo mode**, with clearly labeled scripted replies. No AI model, provider key, or model download is included.
 
+## Access over LAN
+
+Run **`npm run lan`**, then open **http://192.168.88.19:8000** from another device on the same network. This computer’s current LAN IP is `192.168.88.19`; the general address is `http://<this-computer's-LAN-IP>:8000`. Port 8000 is already permitted by this machine’s UFW configuration.
+
+Keep the app running on this computer. The web interface proxies API requests to `127.0.0.1:3002`, so only the web port needs to be reachable. Ollama can stay on localhost; remote browsers use this computer’s backend to reach it. `npm run dev` uses port 5174 instead; stop the current server before switching commands, since both use API port 3002.
+
+For a production build, run `npm run build`, then `WAFFLE_HOST=0.0.0.0 npm start` and use port **3002** instead. The default production binding remains localhost. If a firewall is enabled, allow only the chosen port from your LAN subnet.
+
+All LAN devices use the same local room, companions, settings, and conversation history. Local mode has no sign-in, so use it on a trusted network. The web interface supports plain HTTP LAN access; some browser features such as clipboard access may require HTTPS.
+
 Use the moon/sun button in the header, or **Settings → Dark mode**, to switch between the soft light and dark palettes. Your choice is saved with your room and cached on this device so dark mode is applied while the room loads. Older room backups default to light mode.
 
 ## Connect a model
+
+Personalize AI behavior in **Settings → Fine-tune the conversation** with the **Conversation prompt** and **Response style** fields. They are saved with your room and sent with each Ollama or OpenRouter chat request, alongside the companion’s personality and memories. Set the language, tone, length, and formatting you prefer; leave the fields empty for the companion’s usual style. Demo replies stay scripted.
 
 - **Ollama:** run Ollama on this computer, download a suitable model, choose “Ollama / local compatible server” in Settings, use `http://127.0.0.1:11434/v1`, and test the connection to discover installed model IDs. A compatible localhost server such as LM Studio or llama.cpp also works if it serves `/models` and streaming `/chat/completions` beneath the configured base URL.
 - **OpenRouter:** choose OpenRouter, enter a key in Settings, test the connection, and select a model ID.

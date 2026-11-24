@@ -1,4 +1,5 @@
 import type { AppState, Companion, Message } from './types';
+import { createId } from './id';
 export const sakura: Companion = {
   id: 'sakura', name: 'Sakura', subtitle: 'Your soft place to land',
   description: 'A thoughtful tea lover who finds magic in little things: rainy afternoons, pressed flowers, and a really good conversation.',
@@ -8,11 +9,11 @@ export const sakura: Companion = {
   memory: '', voiceId: '',
 };
 export function greeting(companion: Companion): Message {
-  return { id: crypto.randomUUID(), role: 'assistant', content: companion.greeting || `Hi, I'm ${companion.name}. It's lovely to meet you.`, createdAt: new Date().toISOString() };
+  return { id: createId(), role: 'assistant', content: companion.greeting || `Hi, I'm ${companion.name}. It's lovely to meet you.`, createdAt: new Date().toISOString() };
 }
 export function initialState(): AppState {
   return { version: 1, companions: [sakura], activeId: sakura.id,
-    settings: { provider: 'demo', model: '', baseUrl: 'http://127.0.0.1:11434/v1', temperature: 0.8, maxTokens: 512, contextMessages: 30, voice: 'off', voiceModel: 'eleven_flash_v2_5', sound: true, motion: true, theme: 'light', background: 'tea' },
+    settings: { provider: 'demo', model: '', baseUrl: 'http://127.0.0.1:11434/v1', temperature: 0.8, maxTokens: 512, contextMessages: 30, conversationPrompt: '', responseStyle: '', voice: 'off', voiceModel: 'eleven_flash_v2_5', sound: true, motion: true, theme: 'light', background: 'tea' },
     chats: { [sakura.id]: [greeting(sakura)] },
   };
 }

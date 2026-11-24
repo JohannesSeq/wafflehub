@@ -23,11 +23,15 @@ test('hosted data requires identity; health does not expose configured keys', as
 test('persistent states are isolated by signed-in user and exclude unknown secrets', async () => {
   const app = createApp(); const env = { store: memoryStore() };
   const data = initialState();
+  data.settings.conversationPrompt = 'Help me explore creative ideas.';
+  data.settings.responseStyle = 'Use concise Spanish replies.';
   const response = await app.request('/api/state', { ...json({ ...data, secrets: {openrouter: 'dont-save-me'}, settings: { ...data.settings, apiKey: 'dont-save-me-either' } }), method: 'PUT' }, env);
   assert.equal(response.status, 200);
   const owner = await app.request('/api/state', { headers: { 'oai-authenticated-user-id': 'owner' } }, env);
   const saved = await owner.text();
   assert.ok(saved.includes('Sakura')); assert.ok(!saved.includes('dont-save-me'));
+  assert.equal(JSON.parse(saved).data.settings.conversationPrompt, data.settings.conversationPrompt);
+  assert.equal(JSON.parse(saved).data.settings.responseStyle, data.settings.responseStyle);
   const other = await app.request('/api/state', { headers: { 'oai-authenticated-user-id': 'someone-else' } }, env);
   assert.deepEqual(await other.json(), { data: null });
 });
@@ -41,32 +45,47 @@ test('rejects cross-origin writes and malformed state', async () => {
   assert.equal(malformed.status, 400);
 });
 
+test('allows same-origin LAN writes while rejecting requests from another LAN origin', async () => {
+  const app = createApp(); const env = { store: memoryStore(), LOCAL_MODE: true };
+  const request = json(initialState());
+  const origin = 'http://192.168.88.19:8000';
+  const sameOrigin = await app.request(`${origin}/api/state`, { ...request, method: 'PUT', headers: { ...request.headers, Origin: origin } }, env);
+  assert.equal(sameOrigin.status, 200);
+  const differentOrigin = await app.request(`${origin}/api/state`, { ...request, method: 'PUT', headers: { ...request.headers, Origin: 'http://192.168.88.20:8000' } }, env);
+  assert.equal(differentOrigin.status, 403);
+});
+
 test('local model endpoints cannot target arbitrary hosts or be reached from hosting', () => {
   assert.throws(() => providerConnection({ provider: 'ollama', baseUrl: 'http://169.254.169.254/v1' }, undefined, { LOCAL_MODE: true }), /localhost/);
   assert.throws(() => providerConnection({ provider: 'ollama', baseUrl: 'http://localhost:11434/v1' }, undefined, {}), /run|local Waffle/);
   assert.equal(providerConnection({ provider: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1/' }, 'cloud-secret', { LOCAL_MODE: true }).url, 'http://127.0.0.1:11434/v1');
 });
 
-test('chat forwards personality, memory, bounded context, and streams without buffering', async () => {
+for (const provider of ['openrouter', 'ollama'] as const) test(`${provider} chat forwards personality, memory, custom instructions, bounded context, and streams without buffering`, async () => {
   let upstreamBody: any;
   let upstreamHeaders: Headers;
   const mock = (async (url, options) => {
-    assert.equal(url, 'https://openrouter.ai/api/v1/chat/completions');
+    assert.equal(url, provider === 'openrouter' ? 'https://openrouter.ai/api/v1/chat/completions' : 'http://127.0.0.1:11434/v1/chat/completions');
     upstreamBody = JSON.parse(options!.body as string);
     upstreamHeaders = new Headers(options?.headers);
     return new Response('data: {"choices":[{"delta":{"content":"Hello!"}}]}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
   }) as typeof fetch;
   const app = createApp(mock);
   const state = initialState();
-  const response = await app.request('/api/chat', json({ settings: { ...state.settings, provider: 'openrouter', model: 'test/model', contextMessages: 2 }, key: 'test-key', companion: { ...sakura, memory: 'The user loves books.' }, messages: [0,1,2,3].map(i => ({ id: String(i), role: i % 2 ? 'user' : 'assistant', content: `message-${i}`, createdAt: new Date().toISOString() })) }), {});
+  const conversationPrompt = 'Help me practice discussing books without giving away spoilers.';
+  const responseStyle = 'Reply in Spanish, in two short paragraphs, without emojis.';
+  const response = await app.request('/api/chat', json({ settings: { ...state.settings, provider, model: 'test/model', contextMessages: 2, conversationPrompt, responseStyle }, key: 'test-key', companion: { ...sakura, memory: 'The user loves books.' }, messages: [0,1,2,3].map(i => ({ id: String(i), role: i % 2 ? 'user' : 'assistant', content: `message-${i}`, createdAt: new Date().toISOString() })) }), { LOCAL_MODE: provider === 'ollama' });
   assert.equal(response.status, 200);
   assert.match(response.headers.get('Content-Type')!, /event-stream/);
   assert.match(await response.text(), /Hello!/);
-  assert.equal(upstreamHeaders!.get('Authorization'), 'Bearer test-key');
+  assert.equal(upstreamHeaders!.get('Authorization'), provider === 'openrouter' ? 'Bearer test-key' : 'Bearer ollama');
   assert.equal(upstreamBody.stream, true);
   assert.equal(upstreamBody.messages.length, 3);
   assert.match(upstreamBody.messages[0].content, /Sakura/);
   assert.match(upstreamBody.messages[0].content, /loves books/);
+  assert.ok(upstreamBody.messages[0].content.includes(conversationPrompt));
+  assert.ok(upstreamBody.messages[0].content.includes(responseStyle));
+  assert.ok(upstreamBody.messages[0].content.indexOf(responseStyle) > upstreamBody.messages[0].content.indexOf(sakura.prompt));
   assert.equal(upstreamBody.messages[1].content, 'message-2');
 });
 

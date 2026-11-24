@@ -33,5 +33,6 @@ const app = createApp();
 app.use('/*', serveStatic({ root: existsSync('dist/client/index.html') ? './dist/client' : './public' }));
 app.get('*', serveStatic({ path: './dist/client/index.html' }));
 const port = Number(process.env.PORT || 3002);
-const server = serve({ fetch: request => app.fetch(request, env), port, hostname: '127.0.0.1' }, () => console.log(`Waffle API: http://127.0.0.1:${port}`));
+const hostname = process.env.WAFFLE_HOST || '127.0.0.1';
+const server = serve({ fetch: request => app.fetch(request, env), port, hostname }, () => console.log(`Waffle API: http://${hostname}:${port}`));
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { server.close(); database.close(); process.exit(0); });

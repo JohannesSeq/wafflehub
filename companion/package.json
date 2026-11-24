@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n api,web \"tsx watch server/node.ts\" \"vite --host 127.0.0.1\"",
+    "dev": "concurrently -k -n api,web \"tsx watch server/node.ts\" \"vite\"",
+    "lan": "concurrently -k -n api,web \"tsx watch server/node.ts\" \"vite --port 8000\"",
     "build": "tsc --noEmit && vite build && node scripts/build-worker.mjs",
     "start": "tsx server/node.ts",
     "check": "tsc --noEmit",

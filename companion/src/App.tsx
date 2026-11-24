@@ -3,6 +3,7 @@ import { Check, ChevronDown, ChevronRight, CircleHelp, Coffee, Copy, Download, E
 import { companionSchema, appStateSchema, type Companion, type Message, type Secrets, type Settings } from './types';
 import { demoReply, greeting, sakura } from './defaults';
 import { api, downloadJSON, pop, readChatStream, timeLabel, useRoom } from './lib';
+import { createId } from './id';
 
 type Panel = 'settings' | 'studio' | 'about' | null;
 type Health = { local: boolean; configured: { openrouter: boolean; elevenlabs: boolean } };
@@ -84,8 +85,8 @@ export default function App() {
     if (messages.length >= 198) { setToast('Export this conversation and start a fresh one to keep your room running smoothly.'); return; }
     stopVoice(); setInput(''); setChatError(''); setBusy(true);
     const controller = new AbortController(); abort.current = controller;
-    const user: Message = { id: crypto.randomUUID(), role: 'user', content: text, createdAt: new Date().toISOString() };
-    const assistant: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', createdAt: new Date().toISOString() };
+    const user: Message = { id: createId(), role: 'user', content: text, createdAt: new Date().toISOString() };
+    const assistant: Message = { id: createId(), role: 'assistant', content: '', createdAt: new Date().toISOString() };
     const history = [...messages, user];
     const id = companion.id;
     setState(s => ({ ...s, chats: { ...s.chats, [id]: [...history, assistant] } }));
@@ -132,7 +133,7 @@ export default function App() {
     try {
       if (file.size > 2000000) throw new Error('Choose a companion file smaller than 2 MB.');
       const data = companionSchema.parse(JSON.parse(await file.text()));
-      const value = { ...data, id: crypto.randomUUID(), artwork: data.artwork.startsWith('/api/art/') ? sakura.artwork : safeArtwork(data.artwork) ? data.artwork : sakura.artwork };
+      const value = { ...data, id: createId(), artwork: data.artwork.startsWith('/api/art/') ? sakura.artwork : safeArtwork(data.artwork) ? data.artwork : sakura.artwork };
       if (state.companions.length >= 30) throw new Error('Your library can hold 30 companions.');
       saveCompanion(value);
     } catch { setToast('That companion file could not be imported. Use a Waffle companion JSON export.'); }
@@ -257,7 +258,7 @@ function Toggle({ label, note, checked, onChange }: {label: string; note: string
 function safeArtwork(value: string) { return value === '' || value.startsWith('/art/') || /^\/api\/art\/[a-f0-9-]{36}\.(png|jpg|webp)$/.test(value) || /^https:\/\//.test(value); }
 
 function StudioForm({ companion, onSave, onExport }: {companion: Companion | null; onSave: (companion: Companion) => void; onExport: (companion: Companion) => void}) {
-  const [draft, setDraft] = useState<Companion>(() => companion ? { ...companion } : { ...sakura, id: crypto.randomUUID(), name: '', subtitle: '', description: '', traits: ['Gentle', 'Curious'], prompt: 'You are a warm and thoughtful fictional virtual companion. Listen carefully, ask natural questions, and respond in a conversational way. Keep replies to a few sentences and adapt to the user’s language.', greeting: 'Hi there! I’m happy we get to meet. What would you like to talk about?', memory: '', voiceId: '' });
+  const [draft, setDraft] = useState<Companion>(() => companion ? { ...companion } : { ...sakura, id: createId(), name: '', subtitle: '', description: '', traits: ['Gentle', 'Curious'], prompt: 'You are a warm and thoughtful fictional virtual companion. Listen carefully, ask natural questions, and respond in a conversational way. Keep replies to a few sentences and adapt to the user’s language.', greeting: 'Hi there! I’m happy we get to meet. What would you like to talk about?', memory: '', voiceId: '' });
   const [traits, setTraits] = useState(draft.traits.join(', '));
   const [error, setError] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -322,7 +323,17 @@ function SettingsForm({ settings, secrets, health, onSave, onExport, onImport }:
     {draft.provider !== 'demo' && <><Field label="Chat model" note="Test the connection to load available models, or enter a model ID."><input list="available-models" required value={draft.model} onChange={e => set('model', e.target.value)} placeholder={draft.provider === 'ollama' ? 'qwen3:8b' : 'provider/model-id'} /></Field><datalist id="available-models">{models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist></>}
     <button className="button button-secondary test-button" type="button" disabled={testing} onClick={() => void test()}>{testing ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={16} />}{testing ? 'Testing connection…' : 'Test connection'}</button>
     {testResult && <p role="status" className={testResult.ok ? 'form-success' : 'form-error'}>{testResult.text}</p>}
-    <details className="advanced-fields"><summary><SlidersHorizontal size={16} /> Fine-tune the conversation<ChevronDown size={15} /></summary><Field label={`Creativity · ${draft.temperature.toFixed(1)}`} note="Lower feels more predictable; higher adds variety."><input type="range" min="0" max="2" step="0.1" value={draft.temperature} onChange={e => set('temperature', Number(e.target.value))} /></Field><div className="two-fields"><Field label="Reply token limit"><input type="number" min="64" max="8192" required value={draft.maxTokens} onChange={e => set('maxTokens', Number(e.target.value))} /></Field><Field label="Context messages"><input type="number" min="2" max="100" required value={draft.contextMessages} onChange={e => set('contextMessages', Number(e.target.value))} /></Field></div></details>
+    <details className="advanced-fields">
+      <summary><SlidersHorizontal size={16} /> Fine-tune the conversation<ChevronDown size={15} /></summary>
+      <Field label="Conversation prompt" note="Extra instructions for all your companions, alongside their personality and memories. Leave empty to use their usual behavior.">
+        <textarea rows={5} maxLength={12000} placeholder="For example: Be a supportive conversation partner. Ask thoughtful questions, help me explore ideas, and avoid giving advice unless I ask." value={draft.conversationPrompt} onChange={e => set('conversationPrompt', e.target.value)} />
+      </Field>
+      <Field label="Response style" note="Personalize the language, tone, length, or format of AI replies. These preferences apply to Ollama and OpenRouter; demo replies remain scripted.">
+        <textarea rows={4} maxLength={6000} placeholder="For example: Reply in Spanish with a warm, playful tone. Keep replies under 100 words, use occasional emojis, and avoid roleplay actions." value={draft.responseStyle} onChange={e => set('responseStyle', e.target.value)} />
+      </Field>
+      <Field label={`Creativity · ${draft.temperature.toFixed(1)}`} note="Lower feels more predictable; higher adds variety."><input type="range" min="0" max="2" step="0.1" value={draft.temperature} onChange={e => set('temperature', Number(e.target.value))} /></Field>
+      <div className="two-fields"><Field label="Reply token limit"><input type="number" min="64" max="8192" required value={draft.maxTokens} onChange={e => set('maxTokens', Number(e.target.value))} /></Field><Field label="Context messages"><input type="number" min="2" max="100" required value={draft.contextMessages} onChange={e => set('contextMessages', Number(e.target.value))} /></Field></div>
+    </details>
     <div className="form-section-title"><Volume2 size={17} /><h3>A familiar voice</h3></div>
     <Field label="Voice provider"><select value={draft.voice} onChange={e => set('voice', e.target.value as Settings['voice'])}><option value="off">Text only</option><option value="browser">Browser voice · no API key</option><option value="elevenlabs">ElevenLabs</option></select></Field>
     {draft.voice === 'browser' && <p className="form-note">Uses your browser’s speech service. Available voices and offline support depend on your browser and operating system.</p>}

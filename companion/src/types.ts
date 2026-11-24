@@ -13,6 +13,8 @@ export const settingsSchema = z.object({
   model: z.string().max(200), baseUrl: z.string().max(500),
   temperature: z.number().min(0).max(2), maxTokens: z.number().int().min(64).max(8192),
   contextMessages: z.number().int().min(2).max(100),
+  conversationPrompt: z.string().max(12000).default(''),
+  responseStyle: z.string().max(6000).default(''),
   voice: z.enum(['off', 'browser', 'elevenlabs']),
   voiceModel: z.string().max(100), sound: z.boolean(), motion: z.boolean(),
   theme: z.enum(['light', 'dark']).default('light'),
