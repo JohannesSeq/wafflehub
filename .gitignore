@@ -1,0 +1,11 @@
+companion/node_modules/
+companion/dist/
+companion/.env
+companion/.env.*
+!companion/.env.example
+companion/.data/
+companion/.sites-runtime/
+companion/.sites-checkout/
+companion/test-results/
+companion/playwright-report/
+*.tar.gz

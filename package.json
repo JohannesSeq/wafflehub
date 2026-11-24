@@ -1,0 +1,11 @@
+{
+  "name": "wafflehub",
+  "private": true,
+  "scripts": {
+    "setup": "npm --prefix companion ci",
+    "dev": "npm --prefix companion run dev",
+    "build": "npm --prefix companion run build",
+    "start": "npm --prefix companion start",
+    "test": "npm --prefix companion test"
+  }
+}

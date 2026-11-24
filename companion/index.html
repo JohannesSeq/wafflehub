@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#fbf7f5" />
+    <script>
+      try {
+        if (localStorage.getItem('waffle-theme') === 'dark') {
+          document.documentElement.dataset.theme = 'dark';
+          document.querySelector('meta[name="theme-color"]').content = '#1b1721';
+        }
+      } catch {}
+    </script>
+    <meta name="description" content="A soft place to land. Meet your illustrated companion, make one of your own, and connect your favorite AI." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Waffle — a little company, a lot of heart</title>
+  </head>
+  <body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body>
+</html>
