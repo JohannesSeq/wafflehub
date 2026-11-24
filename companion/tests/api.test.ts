@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createApp, providerConnection, type Bindings, type Store } from '../server/app';
 import { initialState, sakura } from '../src/defaults';
 import { readChatStream } from '../src/lib';
+import { addReply, selectReply } from '../src/conversation';
 
 function memoryStore(): Store {
   const state = new Map<string, string>();
@@ -25,6 +26,7 @@ test('persistent states are isolated by signed-in user and exclude unknown secre
   const data = initialState();
   data.settings.conversationPrompt = 'Help me explore creative ideas.';
   data.settings.responseStyle = 'Use concise Spanish replies.';
+  data.chats[data.activeId][0] = addReply(data.chats[data.activeId][0], { id: 'saved-alternative', content: 'A saved alternative.', createdAt: new Date().toISOString() });
   const response = await app.request('/api/state', { ...json({ ...data, secrets: {openrouter: 'dont-save-me'}, settings: { ...data.settings, apiKey: 'dont-save-me-either' } }), method: 'PUT' }, env);
   assert.equal(response.status, 200);
   const owner = await app.request('/api/state', { headers: { 'oai-authenticated-user-id': 'owner' } }, env);
@@ -32,6 +34,8 @@ test('persistent states are isolated by signed-in user and exclude unknown secre
   assert.ok(saved.includes('Sakura')); assert.ok(!saved.includes('dont-save-me'));
   assert.equal(JSON.parse(saved).data.settings.conversationPrompt, data.settings.conversationPrompt);
   assert.equal(JSON.parse(saved).data.settings.responseStyle, data.settings.responseStyle);
+  assert.equal(JSON.parse(saved).data.chats[data.activeId][0].selectedVariant, 1);
+  assert.equal(JSON.parse(saved).data.chats[data.activeId][0].variants.length, 2);
   const other = await app.request('/api/state', { headers: { 'oai-authenticated-user-id': 'someone-else' } }, env);
   assert.deepEqual(await other.json(), { data: null });
 });
@@ -48,10 +52,10 @@ test('rejects cross-origin writes and malformed state', async () => {
 test('allows same-origin LAN writes while rejecting requests from another LAN origin', async () => {
   const app = createApp(); const env = { store: memoryStore(), LOCAL_MODE: true };
   const request = json(initialState());
-  const origin = 'http://192.168.88.19:8000';
+  const origin = 'http://192.168.88.19:6767';
   const sameOrigin = await app.request(`${origin}/api/state`, { ...request, method: 'PUT', headers: { ...request.headers, Origin: origin } }, env);
   assert.equal(sameOrigin.status, 200);
-  const differentOrigin = await app.request(`${origin}/api/state`, { ...request, method: 'PUT', headers: { ...request.headers, Origin: 'http://192.168.88.20:8000' } }, env);
+  const differentOrigin = await app.request(`${origin}/api/state`, { ...request, method: 'PUT', headers: { ...request.headers, Origin: 'http://192.168.88.20:6767' } }, env);
   assert.equal(differentOrigin.status, 403);
 });
 
@@ -74,7 +78,9 @@ for (const provider of ['openrouter', 'ollama'] as const) test(`${provider} chat
   const state = initialState();
   const conversationPrompt = 'Help me practice discussing books without giving away spoilers.';
   const responseStyle = 'Reply in Spanish, in two short paragraphs, without emojis.';
-  const response = await app.request('/api/chat', json({ settings: { ...state.settings, provider, model: 'test/model', contextMessages: 2, conversationPrompt, responseStyle }, key: 'test-key', companion: { ...sakura, memory: 'The user loves books.' }, messages: [0,1,2,3].map(i => ({ id: String(i), role: i % 2 ? 'user' : 'assistant', content: `message-${i}`, createdAt: new Date().toISOString() })) }), { LOCAL_MODE: provider === 'ollama' });
+  const messages = [0,1,2,3].map(i => ({ id: String(i), role: i % 2 ? 'user' as const : 'assistant' as const, content: `message-${i}`, createdAt: new Date().toISOString() }));
+  const selected = selectReply(addReply(messages[2], { id: 'hidden-alternative', content: 'An unselected reply.', createdAt: new Date().toISOString() }), 0);
+  const response = await app.request('/api/chat', json({ settings: { ...state.settings, provider, model: 'test/model', contextMessages: 2, conversationPrompt, responseStyle }, key: 'test-key', companion: { ...sakura, memory: 'The user loves books.' }, messages: messages.map((message, index) => index === 2 ? selected : message) }), { LOCAL_MODE: provider === 'ollama' });
   assert.equal(response.status, 200);
   assert.match(response.headers.get('Content-Type')!, /event-stream/);
   assert.match(await response.text(), /Hello!/);
@@ -87,6 +93,8 @@ for (const provider of ['openrouter', 'ollama'] as const) test(`${provider} chat
   assert.ok(upstreamBody.messages[0].content.includes(responseStyle));
   assert.ok(upstreamBody.messages[0].content.indexOf(responseStyle) > upstreamBody.messages[0].content.indexOf(sakura.prompt));
   assert.equal(upstreamBody.messages[1].content, 'message-2');
+  assert.deepEqual(Object.keys(upstreamBody.messages[1]).sort(), ['content', 'role']);
+  assert.ok(!JSON.stringify(upstreamBody.messages).includes('An unselected reply.'));
 });
 
 test('provider errors redact a server-configured key', async () => {

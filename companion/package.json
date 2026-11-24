@@ -5,12 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n api,web \"tsx watch server/node.ts\" \"vite\"",
-    "lan": "concurrently -k -n api,web \"tsx watch server/node.ts\" \"vite --port 8000\"",
+    "lan": "concurrently -k -n api,web \"tsx watch server/node.ts\" \"vite --port 6767\"",
     "build": "tsc --noEmit && vite build && node scripts/build-worker.mjs",
     "start": "tsx server/node.ts",
     "check": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:browser": "node tests/browser.mjs",
+    "test:chat": "node tests/chat-browser.mjs",
+    "test:keys": "node tests/credentials-browser.mjs",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {

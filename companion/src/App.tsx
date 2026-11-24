@@ -1,12 +1,14 @@
 import { cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type ReactElement, type ReactNode } from 'react';
-import { Check, ChevronDown, ChevronRight, CircleHelp, Coffee, Copy, Download, Ellipsis, Expand, Flower2, Heart, House, ImagePlus, Leaf, LoaderCircle, MessageCircle, Moon, Plus, RotateCcw, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Square, Sun, Upload, UsersRound, Volume2, VolumeX, WandSparkles, X } from 'lucide-react';
-import { companionSchema, appStateSchema, type Companion, type Message, type Secrets, type Settings } from './types';
+import { Check, ChevronDown, ChevronRight, CircleHelp, Coffee, Download, Ellipsis, Expand, Flower2, Heart, House, ImagePlus, Leaf, LoaderCircle, MessageCircle, Moon, Plus, RotateCcw, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Square, Sun, Upload, UsersRound, Volume2, VolumeX, WandSparkles, X } from 'lucide-react';
+import { MAX_REPLY_VARIANTS, companionSchema, appStateSchema, type Companion, type Message, type Secrets, type Settings } from './types';
 import { demoReply, greeting, sakura } from './defaults';
-import { api, downloadJSON, pop, readChatStream, timeLabel, useRoom } from './lib';
+import { api, downloadJSON, pop, readChatStream, useRoom } from './lib';
 import { createId } from './id';
+import { addReply, editMessage, regenerationHistory, replyVariants, selectReply } from './conversation';
+import ChatMessage from './ChatMessage';
 
 type Panel = 'settings' | 'studio' | 'about' | null;
-type Health = { local: boolean; configured: { openrouter: boolean; elevenlabs: boolean } };
+type Health = { local: boolean; configured: { openrouter: boolean; elevenlabs: boolean }; keyStorage?: boolean; stored?: { openrouter: boolean; elevenlabs: boolean } };
 const backgrounds = [{ id: 'tea', name: 'Tea room', icon: Coffee }, { id: 'evening', name: 'Evening glow', icon: Moon }, { id: 'garden', name: 'Garden light', icon: Leaf }] as const;
 
 export default function App() {
@@ -20,6 +22,8 @@ export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [generation, setGeneration] = useState<{ companionId: string; message: Message; content: string } | null>(null);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [speaking, setSpeaking] = useState(false);
   const [chatError, setChatError] = useState('');
   const [toast, setToast] = useState('');
@@ -32,6 +36,11 @@ export default function App() {
   const chatBottom = useRef<HTMLDivElement>(null);
   const room = useRef<HTMLDivElement>(null);
   const importInput = useRef<HTMLInputElement>(null);
+  const currentGeneration = generation?.companionId === companion.id ? generation : null;
+  const visibleMessages = currentGeneration && !messages.some(message => message.id === currentGeneration.message.id)
+    ? [...messages, currentGeneration.message] : messages;
+  const lastMessage = visibleMessages.at(-1);
+  const lastDraft = currentGeneration?.message.id === lastMessage?.id ? currentGeneration?.content : undefined;
 
   useLayoutEffect(() => {
     if (!ready) return;
@@ -41,10 +50,26 @@ export default function App() {
   }, [ready, state.settings.theme]);
   useEffect(() => { void api<Health>('/api/health').then(setHealth).catch(() => {}); }, []);
   useEffect(() => { if (toast) { const t = setTimeout(() => setToast(''), 4200); return () => clearTimeout(t); } }, [toast]);
-  useEffect(() => { chatBottom.current?.scrollIntoView({ behavior: 'instant', block: 'nearest' }); }, [messages, busy]);
+  useEffect(() => { chatBottom.current?.scrollIntoView({ behavior: 'instant', block: 'nearest' }); }, [lastMessage?.id, lastMessage?.content, lastDraft]);
+  useEffect(() => { setEditingMessageId(null); }, [companion.id, page]);
   useEffect(() => () => { abort.current?.abort(); voiceAbort.current?.abort(); audio.current?.pause(); window.speechSynthesis?.cancel(); }, []);
   useEffect(() => { if (!menu) return; const close = () => setMenu(false); document.addEventListener('click', close); return () => document.removeEventListener('click', close); }, [menu]);
   function openStudio(value: Companion | null = null) { setEditing(value); setPanel('studio'); }
+  async function savePreferences(settings: Settings, nextSecrets: Secrets) {
+    const patch = Object.fromEntries(Object.entries(nextSecrets).filter(([, value]) => value.trim()).map(([name, value]) => [name, value.trim()]));
+    if (Object.keys(patch).length && !health) throw new Error('Please wait for the server to be ready before saving your keys.');
+    if (health?.keyStorage) {
+      if (Object.keys(patch).length) setHealth(await api<Health>('/api/keys', patch, 'PUT'));
+      setSecrets({ openrouter: '', elevenlabs: '' });
+    } else setSecrets(nextSecrets);
+    if (settings.voice !== state.settings.voice) stopVoice();
+    setState(s => ({ ...s, settings })); setPanel(null); setToast('Your preferences are ready.');
+  }
+  async function removeSavedKey(provider: keyof Secrets) {
+    const result = await api<Health>('/api/keys', { [provider]: null }, 'PUT');
+    setHealth(result); setSecrets(current => ({ ...current, [provider]: '' }));
+    setToast('The locally saved key was removed.');
+  }
   function stopVoice() { voiceAbort.current?.abort(); audio.current?.pause(); window.speechSynthesis?.cancel(); setSpeaking(false); }
   async function speak(text: string) {
     stopVoice();
@@ -75,29 +100,42 @@ export default function App() {
     } catch (error) { if (!controller.signal.aborted) { setSpeaking(false); setToast((error as Error).message || 'Unable to play this voice.'); } }
   }
   function selectCompanion(value: Companion) {
-    abort.current?.abort(); stopVoice(); setBusy(false); setChatError('');
+    cancelGeneration(); stopVoice(); setChatError(''); setEditingMessageId(null);
     setState(s => ({ ...s, activeId: value.id, chats: { ...s.chats, [value.id]: s.chats[value.id] ?? [greeting(value)] } }));
     setPage('room');
   }
   async function send(text = input) {
     text = text.trim();
-    if (!text || busy || !ready) return;
-    if (messages.length >= 198) { setToast('Export this conversation and start a fresh one to keep your room running smoothly.'); return; }
-    stopVoice(); setInput(''); setChatError(''); setBusy(true);
-    const controller = new AbortController(); abort.current = controller;
+    if (!text || busy || abort.current || !ready || editingMessageId) return;
+    if (messages.length + 2 > 200) { setToast('Export this conversation and start a fresh one to keep your room running smoothly.'); return; }
+    setInput('');
     const user: Message = { id: createId(), role: 'user', content: text, createdAt: new Date().toISOString() };
     const assistant: Message = { id: createId(), role: 'assistant', content: '', createdAt: new Date().toISOString() };
     const history = [...messages, user];
+    setState(s => ({ ...s, chats: { ...s.chats, [companion.id]: history } }));
+    await generateReply(history, assistant);
+  }
+  function cancelGeneration() {
+    abort.current?.abort(); abort.current = null;
+    setGeneration(null); setBusy(false);
+  }
+  async function generateReply(history: Message[], target: Message, original?: Message) {
+    if (abort.current || !ready || editingMessageId) return;
+    stopVoice(); setChatError(''); setBusy(true);
+    const controller = new AbortController(); abort.current = controller;
     const id = companion.id;
-    setState(s => ({ ...s, chats: { ...s.chats, [id]: [...history, assistant] } }));
+    setGeneration({ companionId: id, message: target, content: '' });
     let finalText = '';
     const update = (content: string) => {
+      if (controller.signal.aborted || abort.current !== controller) return;
+      if (content.length > 30000) throw new Error('This reply is too long to save. Lower the reply token limit and try again.');
       finalText = content;
-      setState(s => ({ ...s, chats: { ...s.chats, [id]: (s.chats[id] ?? []).map(m => m.id === assistant.id ? { ...m, content } : m) } }));
+      setGeneration({ companionId: id, message: target, content });
     };
     try {
       if (state.settings.provider === 'demo') {
-        const result = demoReply(text, companion, history.length);
+        const text = [...history].reverse().find(message => message.role === 'user')?.content ?? '';
+        const result = demoReply(text, companion, history.length, original ? replyVariants(original).length : 0);
         const words = result.split(' ');
         for (let n = 0; n < words.length; n += 3) {
           await new Promise<void>((resolve, reject) => {
@@ -113,13 +151,40 @@ export default function App() {
         const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: state.settings, companion, messages: history.slice(-state.settings.contextMessages), key: secrets.openrouter }), signal: controller.signal });
         await readChatStream(response, update);
       }
-      if (!controller.signal.aborted && state.settings.voice !== 'off') void speak(finalText);
+      if (controller.signal.aborted || abort.current !== controller) return;
+      const variant = { id: createId(), content: finalText, createdAt: new Date().toISOString() };
+      const completed = original ? addReply(original, variant) : { ...target, content: finalText, variants: [variant], selectedVariant: 0 };
+      setState(s => ({ ...s, chats: { ...s.chats, [id]: original
+        ? (s.chats[id] ?? []).map(message => message.id === target.id ? completed : message)
+        : [...(s.chats[id] ?? []), completed] } }));
+      if (state.settings.voice !== 'off') void speak(finalText);
     } catch (error) {
       if (!controller.signal.aborted) setChatError((error as Error).message);
-      if (!finalText) setState(s => ({ ...s, chats: { ...s.chats, [id]: (s.chats[id] ?? []).filter(m => m.id !== assistant.id) } }));
     } finally {
-      if (abort.current === controller) { setBusy(false); abort.current = null; }
+      if (abort.current === controller) { setBusy(false); setGeneration(null); abort.current = null; }
     }
+  }
+  async function regenerate(messageId: string) {
+    if (busy || abort.current || !ready || editingMessageId) return;
+    const target = messages.find(message => message.id === messageId);
+    if (!target) return;
+    if (replyVariants(target).length >= MAX_REPLY_VARIANTS) { setToast(`You can keep up to ${MAX_REPLY_VARIANTS} replies for one message.`); return; }
+    try { await generateReply(regenerationHistory(messages, messageId), target, target); }
+    catch (error) { setToast((error as Error).message); }
+  }
+  function chooseReply(messageId: string, index: number) {
+    if (busy || !ready || editingMessageId) return;
+    stopVoice(); setChatError('');
+    setState(s => ({ ...s, chats: { ...s.chats, [companion.id]: (s.chats[companion.id] ?? []).map(message => message.id === messageId ? selectReply(message, index) : message) } }));
+  }
+  function saveMessage(messageId: string, text: string) {
+    if (busy || !ready) return;
+    stopVoice(); setChatError('');
+    setState(s => ({ ...s, chats: { ...s.chats, [companion.id]: (s.chats[companion.id] ?? []).map(message => message.id === messageId ? editMessage(message, text) : message) } }));
+  }
+  function retryReply() {
+    if (messages.at(-1)?.role !== 'user' || messages.length >= 200 || busy || !ready || editingMessageId) return;
+    void generateReply(messages, { id: createId(), role: 'assistant', content: '', createdAt: new Date().toISOString() });
   }
   function saveCompanion(value: Companion) {
     setState(s => {
@@ -194,19 +259,32 @@ export default function App() {
             <button className={`connection-strip ${state.settings.provider !== 'demo' ? 'connected' : ''}`} onClick={() => setPanel('settings')}><span><Sparkles size={13} /><strong>{providerLabel}</strong><span>{state.settings.provider === 'demo' ? 'A little preview of the magic' : state.settings.model || 'Choose your model'}</span></span><ChevronRight size={15} /></button>
             <div className="message-list" role="log" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions text">
               <div className="conversation-date"><span />{new Date(messages[0]?.createdAt || Date.now()).toLocaleDateString([], { month: 'long', day: 'numeric' })}<span /></div>
-              {messages.map((message, index) => <div key={message.id} className={`message message-${message.role}`}>
-                {message.role === 'assistant' && <Avatar companion={companion} small />}
-                <div className="message-content"><span className="message-name">{message.role === 'user' ? 'You' : companion.name}<time>{timeLabel(message.createdAt)}</time></span>
-                  <div className="message-bubble">{message.content ? <MessageText text={message.content} /> : <span className="typing-dots" aria-label="Writing a reply"><i /><i /><i /></span>}</div>
-                  {message.role === 'assistant' && message.content && <div className="message-tools"><button aria-label={`Listen to ${companion.name}’s message`} title="Listen to this message" onClick={() => void speak(message.content)}><Volume2 size={13} /></button><button aria-label="Copy message" title="Copy message" onClick={() => { void navigator.clipboard?.writeText(message.content).then(() => setToast('Message copied.')).catch(() => setToast('Your browser could not copy this message.')); }}><Copy size={12} /></button>{state.settings.provider === 'demo' && index > 0 && <span>Scripted demo</span>}</div>}
-                </div>
-              </div>)}
+              {visibleMessages.map((message, index) => <ChatMessage key={message.id} message={message}
+                author={message.role === 'user' ? 'You' : companion.name}
+                avatar={message.role === 'assistant' ? <Avatar companion={companion} small /> : undefined}
+                demo={state.settings.provider === 'demo' && message.role === 'assistant' && index > 0}
+                generating={currentGeneration?.message.id === message.id}
+                draftContent={currentGeneration?.message.id === message.id ? currentGeneration.content : undefined}
+                disabled={busy || !ready} editingBlocked={!!editingMessageId}
+                canRegenerate={message.role === 'assistant' && messages.slice(0, index).some(previous => previous.role === 'user') && replyVariants(message).length < MAX_REPLY_VARIANTS}
+                latest={index === visibleMessages.length - 1}
+                onEditing={editing => setEditingMessageId(editing ? message.id : null)}
+                onSave={text => saveMessage(message.id, text)}
+                onRegenerate={() => void regenerate(message.id)}
+                onChoose={selected => chooseReply(message.id, selected)}
+                onSpeak={() => void speak(message.content)}
+                onCopy={() => {
+                  if (!navigator.clipboard) { setToast('Copying needs HTTPS or localhost in this browser.'); return; }
+                  void navigator.clipboard.writeText(message.content).then(() => setToast('Message copied.')).catch(() => setToast('Your browser could not copy this message.'));
+                }}
+              />)}
               <div ref={chatBottom} />
             </div>
             {chatError && <div className="chat-error" role="alert">{chatError}<button onClick={() => setPanel('settings')}>Open settings</button></div>}
             <div className="chat-compose">
-              {messages.length < 4 && !busy && <div className="suggestions"><span>A little conversation starter</span><div>{['How was your day?', 'Tell me a story', 'I need a little comfort'].map(text => <button key={text} onClick={() => void send(text)} disabled={!ready}>{text}<span>✧</span></button>)}</div></div>}
-              <form onSubmit={e => { e.preventDefault(); void send(); }} className="composer"><textarea aria-label={`Message ${companion.name}`} placeholder={`Tell ${companion.name} what’s on your mind…`} value={input} maxLength={10000} rows={2} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }} /><div className="composer-bottom"><span>Just be yourself. ♡</span>{busy ? <button type="button" className="send-button" aria-label="Stop response" onClick={() => abort.current?.abort()}><Square size={14} fill="currentColor" /></button> : <button type="submit" className="send-button" aria-label="Send message" disabled={!input.trim() || !ready}><Sparkles size={18} /></button>}</div></form>
+              {!busy && messages.at(-1)?.role === 'user' && <button className="button button-secondary retry-reply" disabled={!ready || !!editingMessageId} onClick={retryReply}><RotateCcw size={15} /> Generate reply</button>}
+              {messages.length < 4 && !busy && <div className="suggestions"><span>A little conversation starter</span><div>{['How was your day?', 'Tell me a story', 'I need a little comfort'].map(text => <button key={text} onClick={() => void send(text)} disabled={!ready || !!editingMessageId}>{text}<span>✧</span></button>)}</div></div>}
+              <form onSubmit={e => { e.preventDefault(); void send(); }} className="composer"><textarea aria-label={`Message ${companion.name}`} placeholder={editingMessageId ? 'Finish editing your message first…' : `Tell ${companion.name} what’s on your mind…`} disabled={!!editingMessageId} value={input} maxLength={10000} rows={2} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }} /><div className="composer-bottom"><span>Just be yourself. ♡</span>{busy ? <button type="button" className="send-button" aria-label="Stop response" onClick={() => abort.current?.abort()}><Square size={14} fill="currentColor" /></button> : <button type="submit" className="send-button" aria-label="Send message" disabled={!input.trim() || !ready || !!editingMessageId}><Sparkles size={18} /></button>}</div></form>
               <div className="chat-footnote"><Heart size={11} /> A little space for you to feel heard.<button className={speaking ? 'voice-active' : ''} onClick={() => { if (speaking) stopVoice(); else setPanel('settings'); }} aria-label={speaking ? 'Stop voice playback' : 'Configure voice'}>{speaking ? <Square size={11} /> : <Volume2 size={13} />}{speaking ? 'Stop' : 'Voice'}</button></div>
             </div>
           </section>
@@ -215,17 +293,16 @@ export default function App() {
       </main>
     </div>
     <input ref={importInput} type="file" accept="application/json,.json" className="visually-hidden" aria-label="Import a companion JSON file" onChange={e => { void importCompanion(e.target.files?.[0]); e.currentTarget.value = ''; }} />
-    {panel === 'settings' && <Drawer title="Make yourself at home" eyebrow="YOUR PREFERENCES" onClose={() => setPanel(null)}><SettingsForm settings={state.settings} secrets={secrets} health={health} onSave={(settings, nextSecrets) => { if (settings.voice !== state.settings.voice) stopVoice(); setState(s => ({ ...s, settings })); setSecrets(nextSecrets); setPanel(null); setToast('Your preferences are ready.'); }} onExport={() => downloadJSON('waffle-room-backup.json', state)} onImport={data => { try { const parsed = appStateSchema.parse(data); setState(parsed); setPanel(null); setToast('Your room has been restored.'); } catch { setToast('That backup is not a valid Waffle room file.'); } }} /></Drawer>}
+    {panel === 'settings' && <Drawer title="Make yourself at home" eyebrow="YOUR PREFERENCES" onClose={() => setPanel(null)}><SettingsForm settings={state.settings} secrets={secrets} health={health} onSave={savePreferences} onRemoveKey={removeSavedKey} onExport={() => downloadJSON('waffle-room-backup.json', state)} onImport={data => { try { const parsed = appStateSchema.parse(data); cancelGeneration(); stopVoice(); setEditingMessageId(null); setState(parsed); setPanel(null); setToast('Your room has been restored.'); } catch { setToast('That backup is not a valid Waffle room file.'); } }} /></Drawer>}
     {panel === 'studio' && <Drawer title={editing ? `A little more ${editing.name}` : 'Bring someone to life'} eyebrow="COMPANION STUDIO" onClose={() => setPanel(null)}><StudioForm companion={editing} onSave={saveCompanion} onExport={value => { const exportValue = { ...value, artwork: value.artwork.startsWith('/api/art/') ? '' : value.artwork }; downloadJSON(`${value.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}-companion.json`, exportValue); setToast('Companion exported. Uploaded artwork stays in this room.'); }} /></Drawer>}
-    {panel === 'about' && <Drawer title="A little company, on your terms." eyebrow="HELLO FROM WAFFLE" onClose={() => setPanel(null)}><div className="about-content"><WaffleMark /><p>Waffle is your cozy corner for a conversation with an illustrated virtual companion.</p><h3>Make it yours</h3><p>Create a companion in the Studio, choose their personality and portrait, and connect Ollama or OpenRouter in Settings.</p><h3>A gentle first version</h3><p>Demo mode uses scripted replies. Connect a model for real AI conversations. Portraits have subtle motion; they are not rigged Live2D models.</p><h3>Your room remembers</h3><p>Companions, chats, and preferences are saved to this app’s database. API keys entered in Settings stay in this tab’s memory and are sent only to the app’s backend for provider requests.</p><p className="form-note">Need a fresh start? Export a room backup from Settings first.</p></div></Drawer>}
-    {confirmClear && <Drawer title="A fresh cup, a fresh conversation?" eyebrow="START AGAIN" onClose={() => setConfirmClear(false)}><p className="form-description">This will clear your conversation with {companion.name}. You can save a copy first.</p><div className="stack"><button className="button button-secondary" onClick={() => downloadJSON(`${companion.name}-conversation.json`, { companion: companion.name, messages })}><Download size={16} /> Export conversation</button><button className="button button-pink" onClick={() => { abort.current?.abort(); stopVoice(); setBusy(false); setChatError(''); setState(s => ({ ...s, chats: { ...s.chats, [companion.id]: [greeting(companion)] } })); setConfirmClear(false); }}><RotateCcw size={16} /> Start a new conversation</button></div></Drawer>}
+    {panel === 'about' && <Drawer title="A little company, on your terms." eyebrow="HELLO FROM WAFFLE" onClose={() => setPanel(null)}><div className="about-content"><WaffleMark /><p>Waffle is your cozy corner for a conversation with an illustrated virtual companion.</p><h3>Make it yours</h3><p>Create a companion in the Studio, choose their personality and portrait, and connect Ollama or OpenRouter in Settings.</p><h3>A gentle first version</h3><p>Demo mode uses scripted replies. Connect a model for real AI conversations. Portraits have subtle motion; they are not rigged Live2D models.</p><h3>Your room remembers</h3><p>Companions, chats, and preferences are saved to this app’s database. {health?.keyStorage ? 'API keys are saved privately on the computer running this app and reused after a refresh. They are excluded from room exports and publishing.' : 'API keys entered here stay in this tab’s memory and are sent only to the backend for provider requests.'}</p><p className="form-note">Need a fresh start? Export a room backup from Settings first.</p></div></Drawer>}
+    {confirmClear && <Drawer title="A fresh cup, a fresh conversation?" eyebrow="START AGAIN" onClose={() => setConfirmClear(false)}><p className="form-description">This will clear your conversation with {companion.name}. You can save a copy first.</p><div className="stack"><button className="button button-secondary" onClick={() => downloadJSON(`${companion.name}-conversation.json`, { companion: companion.name, messages })}><Download size={16} /> Export conversation</button><button className="button button-pink" onClick={() => { cancelGeneration(); stopVoice(); setChatError(''); setEditingMessageId(null); setState(s => ({ ...s, chats: { ...s.chats, [companion.id]: [greeting(companion)] } })); setConfirmClear(false); }}><RotateCcw size={16} /> Start a new conversation</button></div></Drawer>}
     {toast && <div className="toast" role="status"><Flower2 size={18} />{toast}<button aria-label="Dismiss notification" onClick={() => setToast('')}><X size={15} /></button></div>}
   </div>;
 }
 
 function NavButton({ icon, label, active, onClick }: {icon: ReactNode; label: string; active?: boolean; onClick: () => void}) { return <button className={`nav-button ${active ? 'active' : ''}`} aria-current={active ? 'page' : undefined} onClick={onClick}>{icon}<span>{label}</span></button>; }
 function Avatar({ companion, small = false }: { companion: Companion; small?: boolean }) { return <div className={`avatar tint-${companion.tint} ${small ? 'avatar-small' : ''}`}><img src={companion.artwork || sakura.artwork} alt="" /></div>; }
-function MessageText({ text }: {text: string}) { return <>{text.split(/(\*[^*]+\*)/g).map((part, i) => part.startsWith('*') && part.endsWith('*') ? <em key={i}>{part.slice(1, -1)}</em> : part)}</>; }
 function WaffleMark() { return <svg viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="6" y="8" width="34" height="34" rx="11" fill="#DCA66E" /><rect x="9" y="11" width="28" height="28" rx="8" fill="#F0C28A" /><path d="M18 14v22M28 14v22M13 20h20M13 30h20" stroke="#C58C58" strokeWidth="3" strokeLinecap="round" /><path d="M36 6c-5-5-12 2 0 10 12-8 5-15 0-10" fill="#D77794" /><path d="M11 14l2-2" stroke="#FFE8B9" strokeWidth="2" strokeLinecap="round" /></svg>; }
 
 function Drawer({ title, eyebrow, children, onClose }: { title: string; eyebrow: string; children: ReactNode; onClose: () => void }) {
@@ -296,14 +373,30 @@ function StudioForm({ companion, onSave, onExport }: {companion: Companion | nul
   </form>;
 }
 
-function SettingsForm({ settings, secrets, health, onSave, onExport, onImport }: {settings: Settings; secrets: Secrets; health: Health | null; onSave: (settings: Settings, secrets: Secrets) => void; onExport: () => void; onImport: (data: unknown) => void}) {
+function SettingsForm({ settings, secrets, health, onSave, onRemoveKey, onExport, onImport }: {settings: Settings; secrets: Secrets; health: Health | null; onSave: (settings: Settings, secrets: Secrets) => Promise<void>; onRemoveKey: (provider: keyof Secrets) => Promise<void>; onExport: () => void; onImport: (data: unknown) => void}) {
   const [draft, setDraft] = useState(settings);
   const [keys, setKeys] = useState(secrets);
   const [models, setModels] = useState<{id: string; name: string}[]>([]);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ok: boolean; text: string} | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const restore = useRef<HTMLInputElement>(null);
   function set<K extends keyof Settings>(key: K, value: Settings[K]) { setDraft(s => ({ ...s, [key]: value })); }
+  async function save() {
+    if (saving) return;
+    setSaving(true); setSaveError('');
+    try { await onSave(draft, keys); }
+    catch (error) { setSaveError((error as Error).message); }
+    finally { setSaving(false); }
+  }
+  async function remove(provider: keyof Secrets) {
+    if (saving) return;
+    setSaving(true); setSaveError('');
+    try { await onRemoveKey(provider); setKeys(current => ({ ...current, [provider]: '' })); }
+    catch (error) { setSaveError((error as Error).message); }
+    finally { setSaving(false); }
+  }
   async function test() {
     setTesting(true); setTestResult(null);
     try {
@@ -313,13 +406,13 @@ function SettingsForm({ settings, secrets, health, onSave, onExport, onImport }:
       if (draft.provider !== 'demo' && !draft.model && result.models[0]) set('model', result.models[0].id);
     } catch (error) { setTestResult({ ok: false, text: (error as Error).message }); } finally { setTesting(false); }
   }
-  return <form className="settings-form" onSubmit={e => { e.preventDefault(); onSave(draft, keys); }}>
+  return <form className="settings-form" onSubmit={e => { e.preventDefault(); void save(); }}>
     <p className="form-description">Choose the mind behind the conversation, find their voice, and add your little finishing touches.</p>
     <div className="form-section-title"><MessageCircle size={17} /><h3>The conversation</h3></div>
     <Field label="Chat provider"><select value={draft.provider} onChange={e => { const provider = e.target.value as Settings['provider']; setDraft(s => ({ ...s, provider, model: '' })); setModels([]); setTestResult(null); }}><option value="demo">Waffle demo · no setup needed</option><option value="ollama">Ollama / local compatible server</option><option value="openrouter">OpenRouter</option></select></Field>
     {draft.provider === 'demo' && <p className="form-callout"><Sparkles size={17} /> A few scripted replies to explore the experience. Choose Ollama or OpenRouter for real AI conversation.</p>}
     {draft.provider === 'ollama' && <><Field label="Local server URL" note="Use the OpenAI-compatible endpoint on your computer."><input type="url" required value={draft.baseUrl} onChange={e => set('baseUrl', e.target.value)} placeholder="http://127.0.0.1:11434/v1" /></Field>{health && !health.local && <p className="form-callout">To reach Ollama on your computer, run this app locally and open http://localhost:5174. A hosted app cannot reach your computer’s localhost.</p>}</>}
-    {draft.provider === 'openrouter' && <Field label="OpenRouter API key" note={health?.configured.openrouter ? 'A server key is configured. Leave this empty to use it, or enter a key for this tab.' : 'Kept in this tab’s memory. You’ll need to re-enter it after a refresh.'}><input type="password" autoComplete="off" value={keys.openrouter} onChange={e => setKeys(s => ({ ...s, openrouter: e.target.value }))} placeholder={health?.configured.openrouter ? 'Server key configured' : 'sk-or-…'} /></Field>}
+    {draft.provider === 'openrouter' && <ProviderKeyField provider="openrouter" label="OpenRouter" value={keys.openrouter} health={health} disabled={saving} onChange={value => setKeys(current => ({ ...current, openrouter: value }))} onRemove={() => void remove('openrouter')} />}
     {draft.provider !== 'demo' && <><Field label="Chat model" note="Test the connection to load available models, or enter a model ID."><input list="available-models" required value={draft.model} onChange={e => set('model', e.target.value)} placeholder={draft.provider === 'ollama' ? 'qwen3:8b' : 'provider/model-id'} /></Field><datalist id="available-models">{models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist></>}
     <button className="button button-secondary test-button" type="button" disabled={testing} onClick={() => void test()}>{testing ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={16} />}{testing ? 'Testing connection…' : 'Test connection'}</button>
     {testResult && <p role="status" className={testResult.ok ? 'form-success' : 'form-error'}>{testResult.text}</p>}
@@ -337,7 +430,7 @@ function SettingsForm({ settings, secrets, health, onSave, onExport, onImport }:
     <div className="form-section-title"><Volume2 size={17} /><h3>A familiar voice</h3></div>
     <Field label="Voice provider"><select value={draft.voice} onChange={e => set('voice', e.target.value as Settings['voice'])}><option value="off">Text only</option><option value="browser">Browser voice · no API key</option><option value="elevenlabs">ElevenLabs</option></select></Field>
     {draft.voice === 'browser' && <p className="form-note">Uses your browser’s speech service. Available voices and offline support depend on your browser and operating system.</p>}
-    {draft.voice === 'elevenlabs' && <><Field label="ElevenLabs API key" note={health?.configured.elevenlabs ? 'Server key configured. A key entered here overrides it for this tab.' : 'Kept in this tab’s memory. Spoken reply text is sent to ElevenLabs.'}><input type="password" autoComplete="off" value={keys.elevenlabs} onChange={e => setKeys(s => ({ ...s, elevenlabs: e.target.value }))} placeholder={health?.configured.elevenlabs ? 'Server key configured' : 'Your ElevenLabs key'} /></Field><Field label="Speech model ID" note="Set each companion’s voice ID in their Studio."><input value={draft.voiceModel} required onChange={e => set('voiceModel', e.target.value)} maxLength={100} /></Field></>}
+    {draft.voice === 'elevenlabs' && <><ProviderKeyField provider="elevenlabs" label="ElevenLabs" value={keys.elevenlabs} health={health} disabled={saving} onChange={value => setKeys(current => ({ ...current, elevenlabs: value }))} onRemove={() => void remove('elevenlabs')} /><Field label="Speech model ID" note="Set each companion’s voice ID in their Studio. Spoken reply text is sent to ElevenLabs."><input value={draft.voiceModel} required onChange={e => set('voiceModel', e.target.value)} maxLength={100} /></Field></>}
     <div className="form-section-title"><Flower2 size={17} /><h3>The little details</h3></div>
     <Toggle label="Dark mode" note="A cozy palette for quieter evenings." checked={draft.theme === 'dark'} onChange={() => set('theme', draft.theme === 'dark' ? 'light' : 'dark')} />
     <Toggle label="Soft little sounds" note="A gentle pop when you tap a button." checked={draft.sound} onChange={() => set('sound', !draft.sound)} />
@@ -345,6 +438,19 @@ function SettingsForm({ settings, secrets, health, onSave, onExport, onImport }:
     <div className="form-section-title"><ShieldCheck size={17} /><h3>Your room, kept safe</h3></div><p className="form-note">Back up your companions, conversations, and preferences. API keys and uploaded artwork files are not included; uploaded portraits stay in this installation.</p>
     <div className="two-fields"><button className="button button-secondary" type="button" onClick={onExport}><Download size={15} /> Export room</button><button className="button button-secondary" type="button" onClick={() => restore.current?.click()}><Upload size={15} /> Restore room</button></div>
     <input ref={restore} type="file" accept="application/json,.json" className="visually-hidden" aria-label="Restore room backup" onChange={async e => { const file = e.target.files?.[0]; if (!file) return; if (file.size > 2000000) { setTestResult({ ok: false, text: 'Choose a backup smaller than 2 MB.' }); return; } try { const data = JSON.parse(await file.text()); if (window.confirm('Restore this backup? It will replace your current companions and conversations.')) onImport(data); } catch { setTestResult({ ok: false, text: 'That backup could not be read.' }); } }} />
-    <div className="form-actions"><button className="button button-pink" type="submit"><Check size={16} /> Save preferences</button></div>
+    {saveError && <p className="form-error" role="alert">{saveError}</p>}
+    <div className="form-actions"><button className="button button-pink" type="submit" disabled={saving}>{saving ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />} {saving ? 'Saving…' : 'Save preferences'}</button></div>
   </form>;
+}
+
+function ProviderKeyField({ provider, label, value, health, disabled, onChange, onRemove }: {provider: keyof Secrets; label: string; value: string; health: Health | null; disabled: boolean; onChange: (value: string) => void; onRemove: () => void}) {
+  const stored = !!health?.stored?.[provider];
+  const configured = !!health?.configured[provider];
+  const note = health?.keyStorage
+    ? stored ? 'Saved on this computer. Leave empty to keep it, or enter a replacement.' : configured ? 'A server key is configured. Enter a key to save a local override.' : 'Saved privately on this computer when you save preferences.'
+    : configured ? 'A server key is configured. Leave empty to use it, or enter a key for this tab.' : 'Kept in this tab’s memory. You’ll need to re-enter it after a refresh.';
+  return <div className="provider-key-field">
+    <Field label={`${label} API key`} note={note}><input type="password" autoComplete="off" spellCheck={false} maxLength={1000} value={value} disabled={disabled} onChange={event => onChange(event.target.value)} placeholder={stored ? 'Saved on this computer' : configured ? 'Server key configured' : provider === 'openrouter' ? 'sk-or-…' : 'Your ElevenLabs key'} /></Field>
+    {stored && health?.keyStorage && <button type="button" className="text-button" disabled={disabled} onClick={onRemove} aria-label={`Remove saved ${label} key`}>Remove saved key</button>}
+  </div>;
 }

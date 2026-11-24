@@ -3,6 +3,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { appStateSchema, companionSchema, messageSchema, settingsSchema } from '../src/types';
 import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+import { providerKeyPatchSchema, type KeyStore } from './credentials';
 
 export interface Store {
   readState(owner: string): Promise<string | null>;
@@ -11,7 +12,7 @@ export interface Store {
   getArt(key: string): Promise<{ bytes: ArrayBuffer; type: string } | null>;
 }
 export type Bindings = {
-  DB?: D1Database; BUCKET?: R2Bucket; store?: Store;
+  DB?: D1Database; BUCKET?: R2Bucket; store?: Store; keyStore?: KeyStore;
   LOCAL_MODE?: boolean; OPENROUTER_API_KEY?: string; ELEVENLABS_API_KEY?: string;
   OLLAMA_BASE_URL?: string;
 };
@@ -49,10 +50,15 @@ export function createApp(fetcher: typeof fetch = fetch) {
     }
     await next();
   });
-  app.get('/api/health', c => c.json({
-    ok: true, local: !!c.env.LOCAL_MODE,
-    configured: { openrouter: !!c.env.OPENROUTER_API_KEY, elevenlabs: !!c.env.ELEVENLABS_API_KEY },
-  }));
+  app.get('/api/health', async c => c.json(await keyStatus(c.env)));
+  app.put('/api/keys', async c => {
+    if (!c.env.LOCAL_MODE || !c.env.keyStore) return c.json({ error: 'Local key storage is available only in the local app.' }, 404);
+    const patch = providerKeyPatchSchema.parse(await c.req.json());
+    try {
+      await c.env.keyStore.update(patch);
+      return c.json(await keyStatus(c.env));
+    } catch { return c.json({ error: 'Your API keys could not be saved on this computer. Please try again.' }, 500); }
+  });
   app.get('/api/state', async c => {
     const raw = c.env.store
       ? await c.env.store.readState(c.get('owner'))
@@ -101,7 +107,7 @@ export function createApp(fetcher: typeof fetch = fetch) {
   app.post('/api/models', async c => {
     const { settings, key } = connectionSchema.parse(await c.req.json());
     if (settings.provider === 'demo') return c.json({ models: [{ id: 'demo', name: 'Waffle demo' }] });
-    const connection = providerConnection(settings, key, c.env);
+    const connection = providerConnection(settings, key, settings.provider === 'openrouter' && !key?.trim() ? await withStoredKeys(c.env) : c.env);
     const response = await fetcher(`${connection.url}/models`, { headers: connection.headers, signal: AbortSignal.timeout(15000), redirect: 'error' });
     if (!response.ok) throw new ProviderError(await providerError(response, connection.headers.Authorization.replace(/^Bearer /, '')));
     const payload = await response.json() as { data?: {id: string; name?: string}[] };
@@ -110,7 +116,7 @@ export function createApp(fetcher: typeof fetch = fetch) {
   app.post('/api/chat', async c => {
     const { settings, key, companion, messages } = chatSchema.parse(await c.req.json());
     if (settings.provider === 'demo') return c.json({ error: 'Demo responses are handled in your room. Choose a model in Settings for AI chat.' }, 400);
-    const connection = providerConnection(settings, key, c.env);
+    const connection = providerConnection(settings, key, settings.provider === 'openrouter' && !key?.trim() ? await withStoredKeys(c.env) : c.env);
     if (!settings.model.trim()) return c.json({ error: 'Choose a chat model in Settings first.' }, 400);
     const conversationPrompt = settings.conversationPrompt.trim();
     const responseStyle = settings.responseStyle.trim();
@@ -130,7 +136,7 @@ export function createApp(fetcher: typeof fetch = fetch) {
   });
   app.post('/api/voice', async c => {
     const { text, voiceId, model, key } = voiceSchema.parse(await c.req.json());
-    const secret = key?.trim() || c.env.ELEVENLABS_API_KEY;
+    const secret = key?.trim() || (await withStoredKeys(c.env)).ELEVENLABS_API_KEY;
     if (!secret) return c.json({ error: 'Add your ElevenLabs key in Settings to enable this voice.' }, 400);
     const response = await fetcher(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream`, {
       method: 'POST', headers: { 'xi-api-key': secret, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
@@ -152,6 +158,18 @@ export function createApp(fetcher: typeof fetch = fetch) {
 function requireDB(env: Bindings) {
   if (!env.DB) throw new Error('Database unavailable');
   return env.DB;
+}
+async function withStoredKeys(env: Bindings): Promise<Bindings> {
+  const saved = env.LOCAL_MODE && env.keyStore ? await env.keyStore.read() : {};
+  return { ...env, OPENROUTER_API_KEY: saved.openrouter || env.OPENROUTER_API_KEY, ELEVENLABS_API_KEY: saved.elevenlabs || env.ELEVENLABS_API_KEY };
+}
+async function keyStatus(env: Bindings) {
+  const saved = env.LOCAL_MODE && env.keyStore ? await env.keyStore.read() : {};
+  return {
+    ok: true, local: !!env.LOCAL_MODE, keyStorage: !!(env.LOCAL_MODE && env.keyStore),
+    stored: { openrouter: !!saved.openrouter, elevenlabs: !!saved.elevenlabs },
+    configured: { openrouter: !!(saved.openrouter || env.OPENROUTER_API_KEY), elevenlabs: !!(saved.elevenlabs || env.ELEVENLABS_API_KEY) },
+  };
 }
 export class ProviderError extends Error {}
 export function providerConnection(settings: {provider: string; baseUrl: string}, key: string | undefined, env: Bindings) {

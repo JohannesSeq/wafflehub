@@ -6,6 +6,7 @@ import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createApp, type Bindings, type Store } from './app';
+import { createFileKeyStore } from './key-store';
 
 const dataDir = join(process.cwd(), '.data');
 await mkdir(join(dataDir, 'art'), { recursive: true, mode: 0o700 });
@@ -28,7 +29,7 @@ const store: Store = {
   async putArt(key, bytes) { await mkdir(join(dataDir, 'art', key.split('/')[0]), { recursive: true }); await writeFile(join(dataDir, 'art', key), new Uint8Array(bytes), { mode: 0o600 }); },
   async getArt(key) { try { const bytes = await readFile(join(dataDir, 'art', key)); return { bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, type: key.endsWith('.png') ? 'image/png' : key.endsWith('.jpg') ? 'image/jpeg' : 'image/webp' }; } catch { return null; } },
 };
-const env: Bindings = { LOCAL_MODE: true, store, OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY, ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY, OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL };
+const env: Bindings = { LOCAL_MODE: true, store, keyStore: createFileKeyStore(join(dataDir, 'provider-keys.json')), OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY, ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY, OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL };
 const app = createApp();
 app.use('/*', serveStatic({ root: existsSync('dist/client/index.html') ? './dist/client' : './public' }));
 app.get('*', serveStatic({ path: './dist/client/index.html' }));

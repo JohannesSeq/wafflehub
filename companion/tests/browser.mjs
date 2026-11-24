@@ -9,6 +9,8 @@ const initial = await (await fetch(base + '/api/state')).json();
 if (!initial.data) throw new Error('Open the app once before running the browser flow.');
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1024 } });
+// This legacy room flow must never replace a user's persistent credentials.
+await page.route('**/api/keys', route => route.fulfill({ json: { local: true, keyStorage: true, stored: { openrouter: true, elevenlabs: false }, configured: { openrouter: true, elevenlabs: false } } }));
 const errors = [];
 let uploadId;
 page.on('pageerror', error => errors.push(error.message));
@@ -67,7 +69,7 @@ try {
   await expect(page.getByLabel('OpenRouter API key', { exact: true })).toHaveValue('');
   await page.keyboard.press('Escape');
   expect(errors).toEqual([]);
-  console.log('PASS: demo chat, cancellation, room controls, settings, portrait upload, companion creation/switching, SQLite reload, and tab-only keys.');
+  console.log('PASS: demo chat, cancellation, room controls, settings, portrait upload, companion creation/switching, SQLite reload, and keys excluded from room data.');
 } finally {
   await browser.close();
   await fetch(base + '/api/state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(initial.data) });

@@ -20,9 +20,25 @@ export const settingsSchema = z.object({
   theme: z.enum(['light', 'dark']).default('light'),
   background: z.enum(['tea', 'evening', 'garden']),
 });
+export const MAX_REPLY_VARIANTS = 20;
+export const replyVariantSchema = z.object({
+  id: z.string().min(1).max(100), content: z.string().max(30000),
+  createdAt: z.string().max(50), editedAt: z.string().max(50).optional(),
+});
 export const messageSchema = z.object({
   id: z.string().max(100), role: z.enum(['user', 'assistant']),
   content: z.string().max(30000), createdAt: z.string().max(50),
+  editedAt: z.string().max(50).optional(),
+  variants: z.array(replyVariantSchema).min(1).max(MAX_REPLY_VARIANTS).optional(),
+  selectedVariant: z.number().int().min(0).max(MAX_REPLY_VARIANTS - 1).optional(),
+}).superRefine((message, context) => {
+  if (message.variants) {
+    if (message.role !== 'assistant') context.addIssue({ code: 'custom', path: ['variants'], message: 'Only companion replies can have alternatives.' });
+    const selected = message.variants[message.selectedVariant ?? 0];
+    if (!selected || selected.content !== message.content) context.addIssue({ code: 'custom', path: ['selectedVariant'], message: 'The selected alternative must match the displayed reply.' });
+  } else if (message.selectedVariant !== undefined) {
+    context.addIssue({ code: 'custom', path: ['selectedVariant'], message: 'A selected alternative requires saved alternatives.' });
+  }
 });
 export const appStateSchema = z.object({
   version: z.literal(1), companions: z.array(companionSchema).min(1).max(30),
@@ -32,5 +48,6 @@ export const appStateSchema = z.object({
 export type Companion = z.infer<typeof companionSchema>;
 export type Settings = z.infer<typeof settingsSchema>;
 export type Message = z.infer<typeof messageSchema>;
+export type ReplyVariant = z.infer<typeof replyVariantSchema>;
 export type AppState = z.infer<typeof appStateSchema>;
 export type Secrets = { openrouter: string; elevenlabs: string };

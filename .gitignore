@@ -4,6 +4,8 @@ companion/.env
 companion/.env.*
 !companion/.env.example
 companion/.data/
+# Local provider credentials are private runtime data, never publish them.
+companion/.data/provider-keys.json
 companion/.sites-runtime/
 companion/.sites-checkout/
 companion/test-results/

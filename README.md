@@ -17,7 +17,7 @@ The first run opens Sakura’s room in **demo mode**, with clearly labeled scrip
 
 ## Access over LAN
 
-Run **`npm run lan`**, then open **http://192.168.88.19:8000** from another device on the same network. This computer’s current LAN IP is `192.168.88.19`; the general address is `http://<this-computer's-LAN-IP>:8000`. Port 8000 is already permitted by this machine’s UFW configuration.
+Run **`npm run lan`**, then open **http://192.168.88.19:6767** from another device on the same network. This computer’s current LAN IP is `192.168.88.19`; the general address is `http://<this-computer's-LAN-IP>:6767`. If UFW is enabled, permit this port from the current LAN subnet with `sudo ufw allow from 192.168.88.0/24 to any port 6767 proto tcp`.
 
 Keep the app running on this computer. The web interface proxies API requests to `127.0.0.1:3002`, so only the web port needs to be reachable. Ollama can stay on localhost; remote browsers use this computer’s backend to reach it. `npm run dev` uses port 5174 instead; stop the current server before switching commands, since both use API port 3002.
 
@@ -36,17 +36,21 @@ Personalize AI behavior in **Settings → Fine-tune the conversation** with the 
 - **ElevenLabs:** choose ElevenLabs as the voice provider, enter a key, and put the desired voice ID in the companion’s Studio. Replies are sent to ElevenLabs for synthesis.
 - **Browser voice:** uses `speechSynthesis`. Voice availability and offline support depend on the browser and OS.
 
-Keys entered in Settings remain in the current tab’s memory, are forwarded to the backend for provider requests, and are never included in database records or exports. Refreshing the page clears those keys. For persistent server credentials, copy `companion/.env.example` to `companion/.env` and fill in the optional variables. Keep that file private.
+In the local/LAN app, enter your OpenRouter and ElevenLabs keys in Settings and click **Save preferences**. They are saved on the computer running Waffle in **`companion/.data/provider-keys.json`**, so refreshing the browser or restarting the server keeps them available. The password fields show **Saved on this computer** without returning the keys to the browser. Leave a field empty to keep its saved key, enter a replacement to update it, or use **Remove saved key** to delete it.
+
+The key file is plaintext JSON with owner-only permissions (`0600`, inside a `0700` directory). Both Git ignore files explicitly exclude it, the development server blocks access to `.data/`, and publishing copies/builds exclude runtime data. Keys are excluded from room records, JSON exports, browser storage, and client bundles. Local saved keys take precedence over optional `OPENROUTER_API_KEY` / `ELEVENLABS_API_KEY` defaults in `companion/.env`; removing a saved override restores any environment default. The hosted preview uses server environment keys or temporary tab-only keys and does not write local credential files.
 
 Ollama is available only when Waffle is running locally. A hosted preview cannot reach the user’s localhost. Hosted chat supports OpenRouter and ElevenLabs through its backend.
 
 ## Companion Studio and storage
 
+In chat, use the pencil to edit either side of a conversation. Regenerate a companion reply with the regenerate button, or swipe left past its last saved reply on a touch device. Swipe right to return to earlier replies; desktop users can use the previous/next controls. Replies stay on the same message with a counter, and the selected text is used in future model context. Later messages are kept when an earlier message is edited or regenerated. Up to 20 alternatives per reply are saved with the room and included in exports. Cancelling a regeneration or a provider error preserves the previous reply.
+
 The Studio edits names, traits, background, first greeting, system prompt, explicit memory notes, voice ID, accent color, and portrait. Upload PNG, JPEG, or WebP portraits up to 5 MB. Original transparent artwork is included.
 
 This first version animates the portrait gently; it is **not a rigged Live2D character**. Expression meshes, lip synchronization, outfit rigs, microphone input, and an in-browser illustration editor are future work. The Games section is intentionally omitted.
 
-Locally, the database and uploaded portraits live in `companion/.data/` (ignored by Git). Back up that folder to preserve everything. A room JSON export includes companions, conversation text, settings, and artwork references; it does not embed uploaded images or API keys. Companion exports omit installation-specific image references, so upload the portrait again on another installation.
+Locally, the database, uploaded portraits, and private provider key file live in `companion/.data/` (ignored by Git). A full backup of that folder includes the keys. A room JSON export includes companions, conversation text, settings, and artwork references; it does not embed uploaded images or API keys. Companion exports omit installation-specific image references, so upload the portrait again on another installation.
 
 Hosted builds use a user-scoped D1 state table and R2 portrait storage. The hosted Site remains private; the platform supplies the signed-in user identity. Room writes are debounced and serialized within a tab. Concurrent tabs use last-write-wins; there is no live collaboration. Conversation history is capped at 200 messages per companion, 30 companions, and 1.5 MB total state. Memory notes are explicit; automatic long-term memory is not implemented.
 

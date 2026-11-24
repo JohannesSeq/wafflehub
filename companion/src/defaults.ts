@@ -17,8 +17,13 @@ export function initialState(): AppState {
     chats: { [sakura.id]: [greeting(sakura)] },
   };
 }
-export function demoReply(text: string, companion: Companion, count: number) {
+export function demoReply(text: string, companion: Companion, count: number, alternative = 0) {
   const name = companion.name;
+  if (alternative > 0) return [
+    `*${name} warms their hands around a cup of tea.* Let’s look at it a little differently. What part of that would you most like to explore together?`,
+    'There’s room for more than one way to tell a story. We could start with a small detail—what would you like this moment to feel like?',
+    '*smiles thoughtfully* I’m glad you shared that with me. Would you like a little encouragement, a fresh perspective, or just someone to listen? ♡',
+  ][(alternative - 1) % 3];
   if (/sad|tired|stress|lonely|rough|hard day|overwhelm/i.test(text)) return `*${name} sets down a warm cup of tea.* That sounds like a lot to carry. We can take this moment slowly—would you like to tell me what has been weighing on you?`;
   if (/hello|^hi\b|hey|meet/i.test(text)) return `I'm happy you're here. I'm ${name}, and this little corner is ours to make cozy. How has your day been treating you?`;
   if (/tea|coffee|drink/i.test(text)) return '*slides a little cup across the table* Something warm makes an ordinary moment feel special, doesn’t it? What’s your favorite comfort drink?';
